@@ -8,6 +8,8 @@
 #include "../../Common/GeometryGenerator.h"
 #include "../../Common/Camera.h"
 #include "FrameResource.h"
+#include "VRSMaskGen.h"
+#include "RenderTarget.h"
 
 using Microsoft::WRL::ComPtr;
 using namespace DirectX;
@@ -83,7 +85,8 @@ private:
 	void UpdateMainPassCB(const GameTimer& gt);
 
 	void LoadTextures();
-    void BuildRootSignature();
+    void BuildRootSignature(); 
+	void BuildVRSMaskGenRootSignature();
 	void BuildDescriptorHeaps();
     void BuildShadersAndInputLayout();
     void BuildSkullGeometry();
@@ -103,7 +106,8 @@ private:
 
     UINT mCbvSrvDescriptorSize = 0;
 
-    ComPtr<ID3D12RootSignature> mRootSignature = nullptr;
+	ComPtr<ID3D12RootSignature> mRootSignature = nullptr;
+	ComPtr<ID3D12RootSignature> mVRSMaskGenRootSignature = nullptr;
 
 	ComPtr<ID3D12DescriptorHeap> mSrvDescriptorHeap = nullptr;
 
@@ -117,7 +121,8 @@ private:
 
 	// List of all the render items.
 	std::vector<std::unique_ptr<RenderItem>> mAllRitems;
-
+	std::unique_ptr<VRSMaskGenPass> mVRSMaskGenPass = nullptr;
+	std::unique_ptr<RenderTarget> mOffscreenRT = nullptr;
 	// Render items divided by PSO.
 	std::vector<RenderItem*> mOpaqueRitems;
 
@@ -180,10 +185,17 @@ bool InstancingAndCullingApp::Initialize()
 	// so we have to query this information.
     mCbvSrvDescriptorSize = md3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
+	mVRSMaskGenPass = std::make_unique<VRSMaskGenPass>(md3dDevice.Get(), 256, 256, DXGI_FORMAT_R8_UINT);
+	mOffscreenRT = std::make_unique<RenderTarget>(
+		md3dDevice.Get(),
+		mClientWidth, mClientHeight,
+		mBackBufferFormat);
+
 	mCamera.SetPosition(0.0f, 2.0f, -15.0f);
  
 	LoadTextures();
     BuildRootSignature();
+	BuildVRSMaskGenRootSignature();
 	BuildDescriptorHeaps();
     BuildShadersAndInputLayout();
 	BuildSkullGeometry();
@@ -207,6 +219,14 @@ void InstancingAndCullingApp::OnResize()
 {
     D3DApp::OnResize();
 
+	if (mVRSMaskGenPass != nullptr)
+	{
+		mVRSMaskGenPass->OnResize(mClientWidth, mClientHeight);
+	}
+	if (mOffscreenRT != nullptr)
+	{
+		mOffscreenRT->OnResize(mClientWidth, mClientHeight);
+	}
 	mCamera.SetLens(0.25f*MathHelper::Pi, AspectRatio(), 1.0f, 1000.0f);
 
 	BoundingFrustum::CreateFromMatrix(mCamFrustum, mCamera.GetProj());
@@ -252,8 +272,14 @@ void InstancingAndCullingApp::Draw(const GameTimer& gt)
     mCommandList->RSSetScissorRects(1, &mScissorRect);
 
 	// VRS
+	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(mOffscreenRT->Resource(),
+		D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_STATE_RENDER_TARGET));
+	mVRSMaskGenPass->Execute(mCommandList.Get(), mVRSMaskGenRootSignature.Get(),
+		mPSOs["VRSMaskGen"].Get(), mOffscreenRT->Srv());
+
+
 	//mCommandList->RSSetShadingRate(D3D12_SHADING_RATE_4X4, );
-	//reinterpret_cast<ID3D12GraphicsCommandList5*>(mCommandList.Get())->RSSetShadingRate(D3D12_SHADING_RATE_1X2, nullptr);
+	reinterpret_cast<ID3D12GraphicsCommandList5*>(mCommandList.Get())->RSSetShadingRateImage(mOffscreenRT->Resource());
 	if (mVRSTier >= D3D12_VARIABLE_SHADING_RATE_TIER_1)
 	{
 		reinterpret_cast<ID3D12GraphicsCommandList5*>(mCommandList.Get())->RSSetShadingRateImage(nullptr);
@@ -583,13 +609,50 @@ void InstancingAndCullingApp::BuildRootSignature()
         IID_PPV_ARGS(mRootSignature.GetAddressOf())));
 }
 
+void InstancingAndCullingApp::BuildVRSMaskGenRootSignature()
+{
+	CD3DX12_DESCRIPTOR_RANGE srvTable0;
+	srvTable0.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+
+	CD3DX12_DESCRIPTOR_RANGE srvTable1;
+	srvTable1.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1);
+
+	CD3DX12_DESCRIPTOR_RANGE uavTable0;
+	uavTable0.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0);
+	CD3DX12_ROOT_PARAMETER slotRootParameter[3];
+
+	// Perfomance TIP: Order from most frequent to least frequent.
+	slotRootParameter[0].InitAsDescriptorTable(1, &srvTable0);
+	slotRootParameter[1].InitAsDescriptorTable(1, &srvTable1);
+	slotRootParameter[2].InitAsDescriptorTable(1, &uavTable0);
+	auto staticSamplers = GetStaticSamplers();
+	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(3, slotRootParameter, (UINT)staticSamplers.size(), staticSamplers.data(), D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+	ComPtr<ID3DBlob> serializedRootSig = nullptr;
+	ComPtr<ID3DBlob> errorBlob = nullptr;
+
+	HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1, serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
+
+	if (errorBlob != nullptr)
+	{
+		::OutputDebugStringA((char*)errorBlob->GetBufferPointer());
+	}
+	ThrowIfFailed(hr);
+
+	ThrowIfFailed(md3dDevice->CreateRootSignature(
+		0,
+		serializedRootSig->GetBufferPointer(),
+		serializedRootSig->GetBufferSize(),
+		IID_PPV_ARGS(mVRSMaskGenRootSignature.GetAddressOf())));
+}
+
 void InstancingAndCullingApp::BuildDescriptorHeaps()
 {
 	//
 	// Create the SRV heap.
 	//
 	D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-	srvHeapDesc.NumDescriptors = 7;
+	srvHeapDesc.NumDescriptors = 7 + 2;
 	srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 	srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 	ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvDescriptorHeap)));
@@ -657,6 +720,11 @@ void InstancingAndCullingApp::BuildDescriptorHeaps()
 	srvDesc.Format = defaultTex->GetDesc().Format;
 	srvDesc.Texture2D.MipLevels = defaultTex->GetDesc().MipLevels;
 	md3dDevice->CreateShaderResourceView(defaultTex.Get(), &srvDesc, hDescriptor);
+
+	//mVRSMaskGenPass->BuildDescriptors(
+	//	CD3DX12_CPU_DESCRIPTOR_HANDLE(srvCpuStart, sobelSrvOffset, mCbvSrvDescriptorSize),
+	//	CD3DX12_GPU_DESCRIPTOR_HANDLE(srvGpuStart, sobelSrvOffset, mCbvSrvDescriptorSize),
+	//	mCbvSrvDescriptorSize);
 }
 
 void InstancingAndCullingApp::BuildShadersAndInputLayout()
@@ -669,6 +737,7 @@ void InstancingAndCullingApp::BuildShadersAndInputLayout()
 
 	mShaders["standardVS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", nullptr, "VS", "vs_5_1");
 	mShaders["opaquePS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", nullptr, "PS", "ps_5_1");
+	mShaders["VRSMaskGen"] = d3dUtil::CompileShader(L"Shaders/VRSMask.hlsl", nullptr, "CSMain", "cs_5_0");
 	
     mInputLayout =
     {
@@ -789,7 +858,18 @@ void InstancingAndCullingApp::BuildSkullGeometry()
 void InstancingAndCullingApp::BuildPSOs()
 {
     D3D12_GRAPHICS_PIPELINE_STATE_DESC opaquePsoDesc;
-
+	//
+	// PSO for VRS MASK GEN
+	//
+	D3D12_COMPUTE_PIPELINE_STATE_DESC vrsMaskGenPSO = {};
+	vrsMaskGenPSO.pRootSignature = mVRSMaskGenRootSignature.Get();
+	vrsMaskGenPSO.CS =
+	{
+		reinterpret_cast<BYTE*>(mShaders["VRSMaskGen"]->GetBufferPointer()),
+		mShaders["VRSMaskGen"]->GetBufferSize()
+	};
+	vrsMaskGenPSO.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+	ThrowIfFailed(md3dDevice->CreateComputePipelineState(&vrsMaskGenPSO, IID_PPV_ARGS(&mPSOs["VRSMaskGen"])));
 	//
 	// PSO for opaque objects.
 	//
