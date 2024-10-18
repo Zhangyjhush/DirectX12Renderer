@@ -50,9 +50,8 @@ void VRSMaskGenPass::Execute(ID3D12GraphicsCommandList* cmdList, ID3D12RootSigna
 	cmdList->SetComputeRootSignature(rootSig);
 	cmdList->SetPipelineState(pso);
 
-	cmdList->SetComputeRootDescriptorTable(0, input);
-	cmdList->SetComputeRootDescriptorTable(2, mhGpuUav);
-
+	//cmdList->SetComputeRootDescriptorTable(0, input);
+	cmdList->SetComputeRootDescriptorTable(1, mhGpuUav);
 	cmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(mOutput.Get(),
 		D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
 

@@ -271,19 +271,14 @@ void InstancingAndCullingApp::Draw(const GameTimer& gt)
     mCommandList->RSSetViewports(1, &mScreenViewport);
     mCommandList->RSSetScissorRects(1, &mScissorRect);
 
-	// VRS
-	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(mOffscreenRT->Resource(),
-		D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_STATE_RENDER_TARGET));
-	mVRSMaskGenPass->Execute(mCommandList.Get(), mVRSMaskGenRootSignature.Get(),
-		mPSOs["VRSMaskGen"].Get(), mOffscreenRT->Srv());
 
 
 	//mCommandList->RSSetShadingRate(D3D12_SHADING_RATE_4X4, );
-	reinterpret_cast<ID3D12GraphicsCommandList5*>(mCommandList.Get())->RSSetShadingRateImage(mOffscreenRT->Resource());
-	if (mVRSTier >= D3D12_VARIABLE_SHADING_RATE_TIER_1)
-	{
-		reinterpret_cast<ID3D12GraphicsCommandList5*>(mCommandList.Get())->RSSetShadingRateImage(nullptr);
-	}
+	//reinterpret_cast<ID3D12GraphicsCommandList5*>(mCommandList.Get())->RSSetShadingRateImage(mOffscreenRT->Resource());
+	//if (mVRSTier >= D3D12_VARIABLE_SHADING_RATE_TIER_1)
+	//{
+	//	reinterpret_cast<ID3D12GraphicsCommandList5*>(mCommandList.Get())->RSSetShadingRateImage(nullptr);
+	//}
 
     // Indicate a state transition on the resource usage.
 	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
@@ -317,6 +312,11 @@ void InstancingAndCullingApp::Draw(const GameTimer& gt)
     // Indicate a state transition on the resource usage.
 	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
 		D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT));
+
+
+	//// VRS
+	mVRSMaskGenPass->Execute(mCommandList.Get(), mVRSMaskGenRootSignature.Get(),
+		mPSOs["VRSMaskGen"].Get(), mOffscreenRT->Srv());
 
     // Done recording commands.
     ThrowIfFailed(mCommandList->Close());
@@ -614,19 +614,19 @@ void InstancingAndCullingApp::BuildVRSMaskGenRootSignature()
 	CD3DX12_DESCRIPTOR_RANGE srvTable0;
 	srvTable0.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
 
-	CD3DX12_DESCRIPTOR_RANGE srvTable1;
-	srvTable1.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1);
+	//CD3DX12_DESCRIPTOR_RANGE srvTable1;
+	//srvTable1.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
 
 	CD3DX12_DESCRIPTOR_RANGE uavTable0;
 	uavTable0.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0);
-	CD3DX12_ROOT_PARAMETER slotRootParameter[3];
+	CD3DX12_ROOT_PARAMETER slotRootParameter[2];
 
 	// Perfomance TIP: Order from most frequent to least frequent.
+	// slotRootParameter[0].InitAsDescriptorTable(1, &srvTable0);
 	slotRootParameter[0].InitAsDescriptorTable(1, &srvTable0);
-	slotRootParameter[1].InitAsDescriptorTable(1, &srvTable1);
-	slotRootParameter[2].InitAsDescriptorTable(1, &uavTable0);
+	slotRootParameter[1].InitAsDescriptorTable(1, &uavTable0);
 	auto staticSamplers = GetStaticSamplers();
-	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(3, slotRootParameter, (UINT)staticSamplers.size(), staticSamplers.data(), D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(2, slotRootParameter, (UINT)staticSamplers.size(), staticSamplers.data(), D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
 	ComPtr<ID3DBlob> serializedRootSig = nullptr;
 	ComPtr<ID3DBlob> errorBlob = nullptr;
@@ -652,7 +652,7 @@ void InstancingAndCullingApp::BuildDescriptorHeaps()
 	// Create the SRV heap.
 	//
 	D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-	srvHeapDesc.NumDescriptors = 7 + 2;
+	srvHeapDesc.NumDescriptors = 7 + mVRSMaskGenPass->DescriptorCount();
 	srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 	srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 	ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvDescriptorHeap)));
@@ -721,10 +721,14 @@ void InstancingAndCullingApp::BuildDescriptorHeaps()
 	srvDesc.Texture2D.MipLevels = defaultTex->GetDesc().MipLevels;
 	md3dDevice->CreateShaderResourceView(defaultTex.Get(), &srvDesc, hDescriptor);
 
-	//mVRSMaskGenPass->BuildDescriptors(
-	//	CD3DX12_CPU_DESCRIPTOR_HANDLE(srvCpuStart, sobelSrvOffset, mCbvSrvDescriptorSize),
-	//	CD3DX12_GPU_DESCRIPTOR_HANDLE(srvGpuStart, sobelSrvOffset, mCbvSrvDescriptorSize),
-	//	mCbvSrvDescriptorSize);
+	auto srvCpuStart = mSrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart();
+	auto srvGpuStart = mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart();
+
+	auto rtvCpuStart = mRtvHeap->GetCPUDescriptorHandleForHeapStart();
+	mVRSMaskGenPass->BuildDescriptors(
+		CD3DX12_CPU_DESCRIPTOR_HANDLE(srvCpuStart, 7, mCbvSrvDescriptorSize),
+		CD3DX12_GPU_DESCRIPTOR_HANDLE(srvGpuStart, 7, mCbvSrvDescriptorSize),
+		mCbvSrvDescriptorSize);
 }
 
 void InstancingAndCullingApp::BuildShadersAndInputLayout()
